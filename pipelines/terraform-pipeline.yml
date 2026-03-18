@@ -1,0 +1,237 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - terraform/**
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - terraform/**
+
+parameters:
+  - name: environment
+    displayName: "Ambiente"
+    type: string
+    default: dev
+    values:
+      - dev
+      - stg
+      - prod
+  - name: action
+    displayName: "Acción Terraform"
+    type: string
+    default: plan
+    values:
+      - plan
+      - apply
+      - destroy
+
+variables:
+  - group: terraform-${{ parameters.environment }}   # Variable group por ambiente en Azure DevOps
+  - name: TF_WORKING_DIR
+    value: $(System.DefaultWorkingDirectory)/terraform
+  - name: TF_VERSION
+    value: "1.7.5"
+
+stages:
+  # ─────────────────────────────────────────────
+  # STAGE 1: Validación
+  # ─────────────────────────────────────────────
+  - stage: Validate
+    displayName: "Validate"
+    jobs:
+      - job: TerraformValidate
+        displayName: "Terraform fmt & validate"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: TerraformInstaller@1
+            displayName: "Instalar Terraform $(TF_VERSION)"
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: TerraformTaskV4@4
+            displayName: "terraform init"
+            inputs:
+              provider: azurerm
+              command: init
+              workingDirectory: $(TF_WORKING_DIR)
+              backendServiceArm: $(AZURE_SERVICE_CONNECTION)
+              backendAzureRmResourceGroupName: $(TF_BACKEND_RG)
+              backendAzureRmStorageAccountName: $(TF_BACKEND_SA)
+              backendAzureRmContainerName: $(TF_BACKEND_CONTAINER)
+              backendAzureRmKey: "${{ parameters.environment }}.terraform.tfstate"
+
+          - bash: |
+              terraform fmt -check -recursive
+            displayName: "terraform fmt check"
+            workingDirectory: $(TF_WORKING_DIR)
+
+          - task: TerraformTaskV4@4
+            displayName: "terraform validate"
+            inputs:
+              provider: azurerm
+              command: validate
+              workingDirectory: $(TF_WORKING_DIR)
+
+  # ─────────────────────────────────────────────
+  # STAGE 2: Plan
+  # ─────────────────────────────────────────────
+  - stage: Plan
+    displayName: "Plan"
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: TerraformPlan
+        displayName: "Terraform Plan"
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: TerraformInstaller@1
+            displayName: "Instalar Terraform $(TF_VERSION)"
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: TerraformTaskV4@4
+            displayName: "terraform init"
+            inputs:
+              provider: azurerm
+              command: init
+              workingDirectory: $(TF_WORKING_DIR)
+              backendServiceArm: $(AZURE_SERVICE_CONNECTION)
+              backendAzureRmResourceGroupName: $(TF_BACKEND_RG)
+              backendAzureRmStorageAccountName: $(TF_BACKEND_SA)
+              backendAzureRmContainerName: $(TF_BACKEND_CONTAINER)
+              backendAzureRmKey: "${{ parameters.environment }}.terraform.tfstate"
+
+          - task: TerraformTaskV4@4
+            displayName: "terraform plan"
+            inputs:
+              provider: azurerm
+              command: plan
+              workingDirectory: $(TF_WORKING_DIR)
+              environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION)
+              commandOptions: >-
+                -var="app_name=$(APP_NAME)"
+                -var="environment=${{ parameters.environment }}"
+                -var="location=$(AZURE_LOCATION)"
+                -var="docker_image_name=$(DOCKER_IMAGE_NAME)"
+                -var="docker_image_tag=$(DOCKER_IMAGE_TAG)"
+                -var="app_service_sku=$(APP_SERVICE_SKU)"
+                -var="container_port=$(CONTAINER_PORT)"
+                -out=$(TF_WORKING_DIR)/tfplan
+
+          - publish: $(TF_WORKING_DIR)/tfplan
+            artifact: tfplan-${{ parameters.environment }}
+            displayName: "Publicar plan artifact"
+
+  # ─────────────────────────────────────────────
+  # STAGE 3: Apply (solo en main y si se eligió apply)
+  # ─────────────────────────────────────────────
+  - stage: Apply
+    displayName: "Apply"
+    dependsOn: Plan
+    condition: |
+      and(
+        succeeded(),
+        eq('${{ parameters.action }}', 'apply'),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main')
+      )
+    jobs:
+      - deployment: TerraformApply
+        displayName: "Terraform Apply"
+        pool:
+          vmImage: ubuntu-latest
+        environment: ${{ parameters.environment }}   # Permite approval gates en Azure DevOps
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: "Instalar Terraform $(TF_VERSION)"
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: TerraformTaskV4@4
+                  displayName: "terraform init"
+                  inputs:
+                    provider: azurerm
+                    command: init
+                    workingDirectory: $(TF_WORKING_DIR)
+                    backendServiceArm: $(AZURE_SERVICE_CONNECTION)
+                    backendAzureRmResourceGroupName: $(TF_BACKEND_RG)
+                    backendAzureRmStorageAccountName: $(TF_BACKEND_SA)
+                    backendAzureRmContainerName: $(TF_BACKEND_CONTAINER)
+                    backendAzureRmKey: "${{ parameters.environment }}.terraform.tfstate"
+
+                - download: current
+                  artifact: tfplan-${{ parameters.environment }}
+                  displayName: "Descargar plan artifact"
+
+                - task: TerraformTaskV4@4
+                  displayName: "terraform apply"
+                  inputs:
+                    provider: azurerm
+                    command: apply
+                    workingDirectory: $(TF_WORKING_DIR)
+                    environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION)
+                    commandOptions: "$(Pipeline.Workspace)/tfplan-${{ parameters.environment }}/tfplan"
+
+  # ─────────────────────────────────────────────
+  # STAGE 4: Destroy (manual, protegido)
+  # ─────────────────────────────────────────────
+  - stage: Destroy
+    displayName: "Destroy"
+    dependsOn: []
+    condition: eq('${{ parameters.action }}', 'destroy')
+    jobs:
+      - deployment: TerraformDestroy
+        displayName: "Terraform Destroy"
+        pool:
+          vmImage: ubuntu-latest
+        environment: ${{ parameters.environment }}-destroy   # Approval gate separado
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: "Instalar Terraform $(TF_VERSION)"
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: TerraformTaskV4@4
+                  displayName: "terraform init"
+                  inputs:
+                    provider: azurerm
+                    command: init
+                    workingDirectory: $(TF_WORKING_DIR)
+                    backendServiceArm: $(AZURE_SERVICE_CONNECTION)
+                    backendAzureRmResourceGroupName: $(TF_BACKEND_RG)
+                    backendAzureRmStorageAccountName: $(TF_BACKEND_SA)
+                    backendAzureRmContainerName: $(TF_BACKEND_CONTAINER)
+                    backendAzureRmKey: "${{ parameters.environment }}.terraform.tfstate"
+
+                - task: TerraformTaskV4@4
+                  displayName: "terraform destroy"
+                  inputs:
+                    provider: azurerm
+                    command: destroy
+                    workingDirectory: $(TF_WORKING_DIR)
+                    environmentServiceNameAzureRM: $(AZURE_SERVICE_CONNECTION)
+                    commandOptions: >-
+                      -var="app_name=$(APP_NAME)"
+                      -var="environment=${{ parameters.environment }}"
+                      -var="location=$(AZURE_LOCATION)"
+                      -var="docker_image_name=$(DOCKER_IMAGE_NAME)"
+                      -var="docker_image_tag=$(DOCKER_IMAGE_TAG)"
+                      -auto-approve

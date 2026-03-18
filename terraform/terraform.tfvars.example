@@ -1,0 +1,8 @@
+# Copia este archivo a terraform.tfvars y ajusta los valores
+app_name          = "myapp"
+environment       = "dev"
+location          = "eastus2"
+app_service_sku   = "B1"
+docker_image_name = "myapp"
+docker_image_tag  = "latest"
+container_port    = "8080"
