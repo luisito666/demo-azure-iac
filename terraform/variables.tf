@@ -40,3 +40,9 @@ variable "container_port" {
   type        = string
   default     = "8000"
 }
+
+variable "dummy_var" {
+  description = "Puerto expuesto por el contenedor"
+  type        = string
+  default     = "8000"
+}
