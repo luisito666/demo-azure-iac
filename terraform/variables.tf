@@ -38,5 +38,5 @@ variable "docker_image_tag" {
 variable "container_port" {
   description = "Puerto expuesto por el contenedor"
   type        = string
-  default     = "8080"
+  default     = "8000"
 }
