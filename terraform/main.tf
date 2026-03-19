@@ -30,7 +30,7 @@ resource "azurerm_resource_group" "main" {
 
 # --- Azure Container Registry ---
 resource "azurerm_container_registry" "acr" {
-  name                = "acr${var.app_name}${var.environment}"
+  name                = "acr${replace(var.app_name, "-", "")}${var.environment}"
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   sku                 = "Basic"
